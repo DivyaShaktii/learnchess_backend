@@ -1,0 +1,25 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDEs and Editors
+.vscode/
+.idea/
+
+# Stockfish binaries and downloads
+stockfish.exe
+stockfish
+stockfish.zip
+stockfish.tar
+stockfish-*/
+
+# OS generated files
+.DS_Store
+Thumbs.db
