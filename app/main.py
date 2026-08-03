@@ -19,7 +19,7 @@ from .schemas import (
 )
 
 from .puzzle_manager import PuzzleManager
-
+## Main - adding comments
 engine: StockfishEngine = None
 opponent_engine: StockfishEngine = None
 manager: GameManager = None
