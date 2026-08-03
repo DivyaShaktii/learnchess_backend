@@ -43,7 +43,7 @@ app = FastAPI(title="Chess Mistake Coach API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     
-    allow_origins=["https://chess-front-seven.vercel.app/"],  # tighten this to your frontend's origin in production
+    allow_origins=["https://www.learnchess.live"],  # tighten this to your frontend's origin in production
     allow_methods=["*"],
     allow_headers=["*"],
 )
