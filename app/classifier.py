@@ -1,6 +1,5 @@
 """
 Move classification engine.
-add
 
 Mirrors the category system you described:
   1. Early plies (1-3)         -> "Book"      (known opening theory)
@@ -29,6 +28,8 @@ LABELS = {
     "MISTAKE": "Mistake",
     "BLUNDER": "Blunder",
     "WORST": "Worst Move",
+    "OPENING_PAWN_WARNING": "Opening Pawn Warning",
+    "OPENING_PRINCIPLE": "Opening Principle",
 }
 
 # A small, extensible opening book of common first moves (uci) for both
@@ -39,9 +40,10 @@ BOOK_MOVES_UCI = {
     "c7c6", "b7b6", "g2g3", "f2f4", "b8a6", "g8h6",
 }
 
-WARN_LABELS = {LABELS["INACCURACY"], LABELS["MISTAKE"], LABELS["BLUNDER"], LABELS["WORST"]}
-BOX_LABELS = {LABELS["INACCURACY"], LABELS["MISTAKE"], LABELS["BLUNDER"], LABELS["WORST"]}
+WARN_LABELS = {LABELS["INACCURACY"], LABELS["MISTAKE"], LABELS["BLUNDER"], LABELS["WORST"], LABELS["OPENING_PAWN_WARNING"]}
+BOX_LABELS = {LABELS["INACCURACY"], LABELS["MISTAKE"], LABELS["BLUNDER"], LABELS["WORST"], LABELS["OPENING_PAWN_WARNING"]}
 
+import random
 
 class MoveClassifier:
     def __init__(self, engine: StockfishEngine, book_ply_limit: int = 3):
@@ -55,16 +57,30 @@ class MoveClassifier:
         played_english = self._san_to_english(board, move, san)
         
         # 1) Book-move shortcut for the opening
-        if ply_number <= self.book_ply_limit and uci in BOOK_MOVES_UCI:
-            return {
-                "label": LABELS["BOOK"],
-                "cp_loss": 0,
-                "best_move_san": san,
-                "best_move_uci": uci,
-                "top_alternatives": [],
-                "explanation": f"{played_english} is standard opening theory -- a solid, well-known move.",
-            }
+        if ply_number <= self.book_ply_limit:
+            piece = board.piece_at(move.from_square)
+            if piece and piece.piece_type == chess.PAWN:
+                file_idx = chess.square_file(move.from_square)
+                if file_idx in (0, 1, 6, 7): # a, b, g, h
+                    return {
+                        "label": LABELS["OPENING_PAWN_WARNING"],
+                        "cp_loss": 50,
+                        "best_move_san": san,
+                        "best_move_uci": uci,
+                        "top_alternatives": [],
+                        "explanation": "Build your minor pieces.",
+                    }
 
+            if uci in BOOK_MOVES_UCI:
+                msg = random.choice(["Build your minor pieces.", "Develop your center."])
+                return {
+                    "label": LABELS["OPENING_PRINCIPLE"],
+                    "cp_loss": 0,
+                    "best_move_san": san,
+                    "best_move_uci": uci,
+                    "top_alternatives": [],
+                    "explanation": msg,
+                }
         # 2) Ask the engine for its top lines from the current position
         top_lines = self.engine.best_moves(board, n=3)
         if not top_lines or top_lines[0]["move"] is None:
@@ -113,11 +129,7 @@ class MoveClassifier:
 
     def _label_from_cp_loss(self, cp_loss, is_top_move, board, move, played_cp) -> str:
         if is_top_move:
-            if self._is_brilliant_candidate(board, move, played_cp):
-                return LABELS["BRILLIANT"]
-            return LABELS["BEST"]
-        if cp_loss <= 10:
-            return LABELS["EXCELLENT"]
+            return LABELS["GOOD"]
         if cp_loss <= 25:
             return LABELS["GOOD"]
         if cp_loss <= 60:

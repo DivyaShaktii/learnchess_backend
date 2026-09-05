@@ -5,6 +5,7 @@ from typing import List, Optional
 class NewGameRequest(BaseModel):
     starting_fen: Optional[str] = None
     opponent_rating: Optional[int] = 1500  # 1320-3190, default mid-range
+    user_id: Optional[str] = None
 
 
 class PreMoveCheckRequest(BaseModel):
@@ -67,6 +68,7 @@ class GameStateResponse(BaseModel):
     is_game_over: bool
     result: Optional[str] = None
     move_history: List[dict] = Field(default_factory=list)
+    opponent_rating: Optional[int] = None
 
 class StartPuzzleRequest(BaseModel):
     level: int  # 1-5
@@ -83,3 +85,12 @@ class PuzzleStateResponse(BaseModel):
     opponent_reply_uci: Optional[str] = None
     solved: Optional[bool] = None
     first_move_source: Optional[str] = None
+
+class CreateOrderRequest(BaseModel):
+    user_id: str
+
+class VerifyPaymentRequest(BaseModel):
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+    user_id: str

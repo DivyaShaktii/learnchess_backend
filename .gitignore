@@ -23,3 +23,10 @@ stockfish-*/
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# Environment & Data
+.env
+.env.*
+!.env.example
+*.db
+app/data/*.db

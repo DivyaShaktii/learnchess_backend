@@ -10,27 +10,32 @@ Set the STOCKFISH_PATH env var to point at the binary if it's not
 on your PATH (e.g. STOCKFISH_PATH=/usr/games/stockfish).
 """
 
-import logging
 import os
+import sys
+import asyncio
 import chess
 import chess.engine
 from pathlib import Path
 from typing import List, Optional
 
-logger = logging.getLogger(__name__)
+if sys.platform == 'win32':
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    except Exception:
+        pass
 
 def _find_stockfish() -> str:
-    """Return STOCKFISH_PATH env var if set, otherwise look for the stockfish
-    binary next to this file or in the parent directory, then fall back to PATH."""
+    """Return STOCKFISH_PATH env var if set, otherwise look for stockfish.exe
+    next to this file or in the parent directory, then fall back to PATH."""
     if "STOCKFISH_PATH" in os.environ:
         return os.environ["STOCKFISH_PATH"]
     # Look for stockfish binary beside engine.py or one level up (Backend/)
     here = Path(__file__).parent
     candidates = [
-        here / "stockfish",
-        here.parent / "stockfish",
         here / "stockfish.exe",
+        here / "stockfish",
         here.parent / "stockfish.exe",
+        here.parent / "stockfish",
     ]
     for candidate in candidates:
         if candidate.is_file():
@@ -45,48 +50,47 @@ import threading
 
 class StockfishEngine:
     def __init__(self, path: str = STOCKFISH_PATH, depth: int = 14,
-                 threads: int = 2, hash_mb: int = 128):
+                 threads: int = 2, hash_mb: int = 128, timeout: float = 30.0):
         self.path = path
         self.depth = depth
         self.threads = threads
         self.hash_mb = hash_mb
+        self.timeout = timeout
         self.lock = threading.Lock()
         self.engine = None
-        self._start_engine(raise_on_failure=False)
+        self._start_engine()
 
-    def _start_engine(self, raise_on_failure: bool = True):
-        import stat
-        if os.name != 'nt' and os.path.exists(self.path):
+    def _start_engine(self):
+        import time
+        last_err = None
+        for attempt in range(3):
             try:
-                st = os.stat(self.path)
-                os.chmod(self.path, st.st_mode | stat.S_IEXEC)
-            except Exception:
-                pass
-        try:
-            self.engine = chess.engine.SimpleEngine.popen_uci(self.path)
-            self.engine.configure({"Threads": self.threads, "Hash": self.hash_mb})
-        except FileNotFoundError as e:
-            self.engine = None
-            message = (
-                f"Could not find Stockfish binary at '{self.path}'. "
-                f"Install Stockfish and/or set the STOCKFISH_PATH env var."
-            )
-            if raise_on_failure:
-                raise RuntimeError(message) from e
-            logger.warning(
-                "%s The engine will be started lazily on first use.", message
-            )
+                self.engine = chess.engine.SimpleEngine.popen_uci(self.path, timeout=self.timeout)
+                self.engine.configure({"Threads": self.threads, "Hash": self.hash_mb})
+                return
+            except FileNotFoundError as e:
+                raise RuntimeError(
+                    f"Could not find Stockfish binary at '{self.path}'. "
+                    f"Install Stockfish and/or set the STOCKFISH_PATH env var."
+                ) from e
+            except Exception as e:
+                last_err = e
+                print(f"Warning: Stockfish startup attempt {attempt + 1}/3 failed ({e}). Retrying in 1s...")
+                time.sleep(1.0)
+        raise RuntimeError(f"Could not start Stockfish binary at '{self.path}': {last_err}") from last_err
 
-    def _ensure_engine(self):
-        """Lazily (re)start the underlying Stockfish process if it isn't
-        running yet, raising a clear error if the binary truly can't be found."""
-        if self.engine is None:
-            self._start_engine(raise_on_failure=True)
+    def close(self):
+        with self.lock:
+            if self.engine:
+                try:
+                    self.engine.quit()
+                except Exception:
+                    pass
+                self.engine = None
 
     def set_strength(self, elo: Optional[int]):
         """Limit this engine instance's playing strength to the given Elo
         (1320-3190), or pass None to restore full strength."""
-        self._ensure_engine()
         with self.lock:
             if elo is not None:
                 elo = max(1320, min(3190, elo))
@@ -110,7 +114,6 @@ class StockfishEngine:
                 "Cannot analyse."
             )
 
-        self._ensure_engine()
         with self.lock:
             try:
                 if multipv:
@@ -137,19 +140,18 @@ class StockfishEngine:
     def close(self):
         with self.lock:
             try:
-                if self.engine is not None:
-                    self.engine.quit()
+                self.engine.quit()
             except Exception:
                 pass
 
-    def best_moves(self, board: chess.Board, n: int = 3, depth: Optional[int] = None) -> List[dict]:
+    def best_moves(self, board: chess.Board, n: int = 3, depth: Optional[int] = None, time_limit: Optional[float] = None) -> List[dict]:
         """Top-N candidate moves with evaluation, from the mover's perspective.
 
-        Uses whichever limit fires first: the configured depth OR 1.5 s.
-        This keeps the robot responsive while still playing decent moves.
-        Move-quality analysis (precheck/commit) uses pure depth limits for accuracy.
+        Uses whichever limit fires first: the configured depth OR the provided time_limit.
+        Move-quality analysis and hints use pure depth limits for accuracy.
+        Robot moves can pass a time_limit to keep the game responsive.
         """
-        limit = chess.engine.Limit(depth=depth or self.depth, time=1.5)
+        limit = chess.engine.Limit(depth=depth or self.depth, time=time_limit)
         multipv = min(n, board.legal_moves.count()) or 1
         infos = self._safe_analyse(board, limit, multipv=multipv)
         if isinstance(infos, dict):
@@ -201,4 +203,3 @@ class StockfishEngine:
             "is_mate_threat": score.is_mate(),
             "mate_in": score.mate() if score.is_mate() else None,
         }
-
