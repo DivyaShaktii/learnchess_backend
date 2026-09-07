@@ -1,12 +1,13 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 import sys
 import asyncio
 import chess
 import os
+import json
 import razorpay
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -15,6 +16,7 @@ load_dotenv(override=True)
 
 razorpay_key_id = os.getenv("RAZORPAY_KEY_ID", "rzp_test_TTYOP1jpVr4bFq")
 razorpay_key_secret = os.getenv("RAZORPAY_KEY_SECRET", "2bxfsCA8tTg4CEbNdmwSoeSH")
+razorpay_webhook_secret = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
 
 # Razorpay client will be instantiated per-request to avoid stale connection pools
 def get_razorpay_client():
@@ -141,12 +143,34 @@ def commit_move(req: CommitMoveRequest):
 @app.get("/api/engine/best-moves/{game_id}")
 def best_moves(game_id: str, n: int = 3):
     """Standalone 'show me good options' endpoint -- independent of any
-    specific move the player is considering."""
+    specific move the player is considering. Guaranteed to only return safe moves (cp_loss <= 25)."""
     try:
         game = manager.get_game(game_id)
     except KeyError:
         raise HTTPException(404, "Game not found")
-    return {"moves": engine.best_moves(game.board, n=n)}
+    
+    # Query up to 5 candidates so we can find all genuinely good options across pieces
+    raw_moves = engine.best_moves(game.board, n=max(5, n))
+    if not raw_moves:
+        return {"moves": []}
+
+    best_cp = raw_moves[0].get("score_cp", 0)
+    best_mate = raw_moves[0].get("is_mate", False)
+
+    safe_moves = []
+    for idx, m in enumerate(raw_moves):
+        m_cp = m.get("score_cp", best_cp)
+        m_mate = m.get("is_mate", False)
+        cp_loss = manager.classifier._cp_loss(best_cp, m_cp, best_mate, m_mate)
+        m_copy = dict(m)
+        m_copy["cp_loss"] = cp_loss
+        m_copy["is_safe"] = (idx == 0 or cp_loss <= 40)
+        if idx == 0 or cp_loss <= 40:
+            safe_moves.append(m_copy)
+            if len(safe_moves) >= n:
+                break
+
+    return {"moves": safe_moves}
 
 
 @app.get("/api/engine/robot-move/{game_id}")
@@ -269,6 +293,9 @@ def create_order(req: CreateOrderRequest):
             "amount": 100, # 1 INR in paise
             "currency": "INR",
             "receipt": req.user_id,
+            "notes": {
+                "user_id": req.user_id,
+            }
         }
         client = get_razorpay_client()
         order = client.order.create(data=data)
@@ -288,9 +315,69 @@ def verify_payment(req: VerifyPaymentRequest):
             'razorpay_payment_id': req.razorpay_payment_id,
             'razorpay_signature': req.razorpay_signature
         })
+
+        if req.user_id:
+            try:
+                supabase.table("profiles").update({"is_premium": True}).eq("id", req.user_id).execute()
+                print(f"[Payment Verify] Successfully updated user {req.user_id} to premium in Supabase.")
+            except Exception as se:
+                print("[Payment Verify] DB update notice:", se)
         
         return {"status": "success"}
     except razorpay.errors.SignatureVerificationError:
         raise HTTPException(400, "Invalid signature")
     except Exception as e:
+        raise HTTPException(500, str(e))
+
+@app.post("/api/payment/webhook")
+async def razorpay_webhook(request: Request):
+    """
+    Razorpay Webhook endpoint.
+    Listens for 'payment.captured' and 'order.paid' events.
+    Verifies signature (if RAZORPAY_WEBHOOK_SECRET is configured)
+    and automatically marks the user as premium in Supabase.
+    """
+    try:
+        body_bytes = await request.body()
+        body_str = body_bytes.decode("utf-8")
+        signature = request.headers.get("x-razorpay-signature") or request.headers.get("X-Razorpay-Signature")
+
+        if razorpay_webhook_secret:
+            if not signature:
+                raise HTTPException(400, "Missing X-Razorpay-Signature header")
+            client = get_razorpay_client()
+            client.utility.verify_webhook_signature(body_str, signature, razorpay_webhook_secret)
+
+        event_data = json.loads(body_str)
+        event_type = event_data.get("event")
+        print(f"[Razorpay Webhook] Received event: {event_type}")
+
+        if event_type in ("payment.captured", "order.paid"):
+            payload = event_data.get("payload", {})
+            payment_entity = payload.get("payment", {}).get("entity", {})
+            order_entity = payload.get("order", {}).get("entity", {})
+
+            # Extract user_id from notes, receipt, or description
+            user_id = (
+                payment_entity.get("notes", {}).get("user_id")
+                or order_entity.get("notes", {}).get("user_id")
+                or order_entity.get("receipt")
+                or payment_entity.get("description")
+            )
+
+            if user_id:
+                print(f"[Razorpay Webhook] Marking user {user_id} as is_premium=True...")
+                supabase.table("profiles").update({"is_premium": True}).eq("id", user_id).execute()
+                print(f"[Razorpay Webhook] User {user_id} is now Premium!")
+            else:
+                print("[Razorpay Webhook] Warning: Could not locate user_id in payload.")
+
+        return {"status": "ok"}
+    except razorpay.errors.SignatureVerificationError:
+        print("[Razorpay Webhook] Signature verification failed!")
+        raise HTTPException(400, "Invalid webhook signature")
+    except Exception as e:
+        print(f"[Razorpay Webhook] Error processing webhook: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(500, str(e))

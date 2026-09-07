@@ -1,0 +1,4 @@
+Good means loss is under 40
+Inaccuracy means loss is under 90
+Mistake means loss is under 180
+Blunder means loss is under 350

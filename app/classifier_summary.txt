@@ -1,0 +1,36 @@
+==================================================
+CHESS ENGINE MOVE CLASSIFICATION LOGIC
+==================================================
+
+1. THE OPENING PHASE (Ply 1-3)
+--------------------------------------------------
+During the very start of the game, the classifier uses special logic instead of heavy engine analysis:
+
+* Edge Pawn Warning (OPENING_PAWN_WARNING):
+  If a player moves an 'a', 'b', 'g', or 'h' pawn, it gets intercepted immediately. 
+  It triggers the red "Are you sure?" box, and the coach will say: "Build your minor pieces."
+
+* Standard Book Moves (Opening Principle): 
+  If a player plays a recognized opening move defined in BOOK_MOVES_UCI (like moving an 'e' or 'd' pawn, or a knight), the coach labels it an "Opening Principle".
+  It will randomly say either "Build your minor pieces." or "Develop your center" from the OPENING_MESSAGES list.
+
+2. HIGH-LEVEL TACTICAL SACRIFICES
+--------------------------------------------------
+For the rest of the game, before checking standard engine thresholds, the classifier checks for "genius" moves using _detect_high_level_tactic:
+
+* The Condition: It only triggers if a player purposefully sacrifices a Queen or a Rook on a square where it can be captured by the opponent.
+* Brilliant: Awarded if the sacrifice leads to a massive advantage (like +6.00 points) or a forced checkmate.
+* Best Move: Awarded if the sacrifice leads to a strong advantage (+3.00 points).
+* Excellent: Awarded if the sacrifice is mathematically sound but doesn't lead to a huge swing.
+
+3. STANDARD ENGINE EVALUATION (Centipawn Loss)
+--------------------------------------------------
+If a move isn't in the opening book and isn't a crazy Queen/Rook sacrifice, it falls back to standard Stockfish analysis. The engine compares the move the player made to the absolute best move possible. 
+
+The difference in score is called "Centipawn Loss" (100 loss = 1 pawn blunder). It categorizes them based on these thresholds:
+
+* Good: Loss is under 25 (Player found a perfectly fine move).
+* Inaccuracy: Loss is under 60 (Player missed something better. Triggers Red Box).
+* Mistake: Loss is under 150 (Player blundered a pawn or positional advantage. Triggers Red Box).
+* Blunder: Loss is under 300 (Player blundered a minor piece like a Knight/Bishop. Triggers Red Box).
+* Worst Move: Loss is over 300 (Player hung their Queen or got checkmated. Triggers Red Box).

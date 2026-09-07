@@ -21,7 +21,7 @@ class Game:
     @property
     def next_ply(self) -> int:
         """1-indexed ply number of the move about to be played."""
-        return len(self.board.move_stack) + 1
+        return self.board.ply() + 1
 
 
 class GameManager:

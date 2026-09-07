@@ -109,6 +109,19 @@ class MoveClassifier:
         except Exception:
             best_english = top_lines[0].get("san", "") if top_lines else ""
 
+        safe_alternatives = []
+        for idx, alt in enumerate(top_lines):
+            alt_cp = alt.get("score_cp", best_cp)
+            alt_mate = alt.get("is_mate", False)
+            alt_loss = self._cp_loss(best_cp, alt_cp, best_is_mate, alt_mate)
+            alt_copy = dict(alt)
+            alt_copy["cp_loss"] = alt_loss
+            alt_copy["is_safe"] = (idx == 0 or alt_loss <= 40)
+            if idx == 0 or alt_loss <= 40:
+                safe_alternatives.append(alt_copy)
+                if len(safe_alternatives) >= 3:
+                    break
+
         return {
             "label": label,
             "cp_loss": cp_loss,
@@ -116,7 +129,7 @@ class MoveClassifier:
             "best_eval_cp": best_cp,
             "best_move_uci": best_uci,
             "best_move_san": top_lines[0]["san"],
-            "top_alternatives": top_lines,
+            "top_alternatives": safe_alternatives,
             "explanation": self._explain(label, played_english, best_english, cp_loss),
         }
 
@@ -130,13 +143,13 @@ class MoveClassifier:
     def _label_from_cp_loss(self, cp_loss, is_top_move, board, move, played_cp) -> str:
         if is_top_move:
             return LABELS["GOOD"]
-        if cp_loss <= 25:
+        if cp_loss <= 40:
             return LABELS["GOOD"]
-        if cp_loss <= 60:
+        if cp_loss <= 90:
             return LABELS["INACCURACY"]
-        if cp_loss <= 150:
+        if cp_loss <= 180:
             return LABELS["MISTAKE"]
-        if cp_loss <= 300:
+        if cp_loss <= 350:
             return LABELS["BLUNDER"]
         return LABELS["WORST"]
 
