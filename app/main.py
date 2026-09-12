@@ -14,17 +14,19 @@ from supabase import create_client, Client
 
 load_dotenv(override=True)
 
-razorpay_key_id = os.getenv("RAZORPAY_KEY_ID", "rzp_test_TTYOP1jpVr4bFq")
-razorpay_key_secret = os.getenv("RAZORPAY_KEY_SECRET", "2bxfsCA8tTg4CEbNdmwSoeSH")
+razorpay_key_id = os.getenv("RAZORPAY_KEY_ID", "")
+razorpay_key_secret = os.getenv("RAZORPAY_KEY_SECRET", "")
 razorpay_webhook_secret = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
 
 # Razorpay client will be instantiated per-request to avoid stale connection pools
 def get_razorpay_client():
+    if not razorpay_key_id or not razorpay_key_secret:
+        raise HTTPException(503, "Payment provider is not configured.")
     return razorpay.Client(auth=(razorpay_key_id, razorpay_key_secret))
 
 
-supabase_url: str = os.getenv("SUPABASE_URL", "https://ipwanamxxugjtpksotxq.supabase.co")
-supabase_key: str = os.getenv("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlwd2FuYW14eHVnanRwa3NvdHhxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc1ODAzNzYsImV4cCI6MjEwMzE1NjM3Nn0.qUDvpcGryR07yaAXPkxZYUfadM9C37wDRInEYOoSf-U")
+supabase_url: str = os.environ["SUPABASE_URL"]
+supabase_key: str = os.environ["SUPABASE_KEY"]
 supabase: Client = create_client(supabase_url, supabase_key)
 
 if sys.platform == 'win32':
@@ -42,6 +44,7 @@ from .schemas import (
 )
 
 from .puzzle_manager import PuzzleManager
+from .payments import authenticated_user, validate_purchase, grant_premium
 
 engine: StockfishEngine = None
 opponent_engine: StockfishEngine = None
@@ -63,9 +66,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Chess Mistake Coach API", lifespan=lifespan)
 
+frontend_origins = [origin.strip() for origin in os.getenv("FRONTEND_URL", "http://localhost:3000").split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten this to your frontend's origin in production
+    allow_origins=frontend_origins,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -197,16 +202,16 @@ def resume_game(user_id: str):
         raise HTTPException(400, str(e))
 
 @app.get("/api/user/profile")
-def user_profile(user_id: str):
+def user_profile(user_id: str, request: Request):
+    authenticated_user(request, supabase, user_id)
     print(f"Fetching user profile for {user_id}")
     try:
         # Get profile data
         try:
-            prof = supabase.table("profiles").select("*").eq("id", user_id).single().execute()
-            data = prof.data if prof.data else {}
+            prof = supabase.table("profiles").select("*").eq("id", user_id).limit(1).execute()
+            data = prof.data[0] if prof.data else {"id": user_id, "is_premium": False}
         except Exception as e:
-            # If profile doesn't exist yet, we'll just return a default
-            data = {"id": user_id, "predicted_rating": 1500}
+            raise HTTPException(503, "Unable to check paid access. Retry without paying again.")
         
         # Get games played this week (active or completed)
         try:
@@ -217,6 +222,8 @@ def user_profile(user_id: str):
             
         data["total_games"] = total_games
         return data
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error in user_profile: {e}")
         raise HTTPException(500, str(e))
@@ -287,97 +294,65 @@ def random_puzzle(level: int = 1):
     }
 
 @app.post("/api/payment/create-order")
-def create_order(req: CreateOrderRequest):
+def create_order(req: CreateOrderRequest, request: Request):
+    user = authenticated_user(request, supabase, req.user_id)
     try:
-        data = {
-            "amount": 100, # 1 INR in paise
-            "currency": "INR",
-            "receipt": req.user_id,
-            "notes": {
-                "user_id": req.user_id,
-            }
-        }
-        client = get_razorpay_client()
-        order = client.order.create(data=data)
-        return {"order_id": order["id"], "amount": 100, "currency": "INR"}
-    except Exception as e:
-        print("RAZORPAY ERROR:", e)
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(500, str(e))
+        order = get_razorpay_client().order.create(data={
+            "amount": 100, "currency": "INR", "receipt": user.id,
+            "notes": {"user_id": user.id},
+        })
+        return {"order_id": order["id"], "amount": 100, "currency": "INR", "key_id": razorpay_key_id}
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(502, "Unable to open checkout. Please retry.")
+
 
 @app.post("/api/payment/verify")
-def verify_payment(req: VerifyPaymentRequest):
+def verify_payment(req: VerifyPaymentRequest, request: Request):
+    user = authenticated_user(request, supabase, req.user_id)
+    client = get_razorpay_client()
     try:
-        client = get_razorpay_client()
         client.utility.verify_payment_signature({
-            'razorpay_order_id': req.razorpay_order_id,
-            'razorpay_payment_id': req.razorpay_payment_id,
-            'razorpay_signature': req.razorpay_signature
+            "razorpay_order_id": req.razorpay_order_id,
+            "razorpay_payment_id": req.razorpay_payment_id,
+            "razorpay_signature": req.razorpay_signature,
         })
-
-        if req.user_id:
-            try:
-                supabase.table("profiles").update({"is_premium": True}).eq("id", req.user_id).execute()
-                print(f"[Payment Verify] Successfully updated user {req.user_id} to premium in Supabase.")
-            except Exception as se:
-                print("[Payment Verify] DB update notice:", se)
-        
+        validate_purchase(client, req.razorpay_order_id, req.razorpay_payment_id, user.id)
+        grant_premium(supabase, user.id)
         return {"status": "success"}
+    except HTTPException:
+        raise
     except razorpay.errors.SignatureVerificationError:
-        raise HTTPException(400, "Invalid signature")
-    except Exception as e:
-        raise HTTPException(500, str(e))
+        raise HTTPException(400, "Invalid payment signature")
+    except Exception:
+        raise HTTPException(502, "Unable to verify payment. Retry verification; do not pay again.")
+
 
 @app.post("/api/payment/webhook")
 async def razorpay_webhook(request: Request):
-    """
-    Razorpay Webhook endpoint.
-    Listens for 'payment.captured' and 'order.paid' events.
-    Verifies signature (if RAZORPAY_WEBHOOK_SECRET is configured)
-    and automatically marks the user as premium in Supabase.
-    """
+    if not razorpay_webhook_secret:
+        raise HTTPException(503, "Webhook is disabled until its signing secret is configured.")
+    signature = request.headers.get("x-razorpay-signature")
+    if not signature:
+        raise HTTPException(400, "Missing webhook signature")
+    body = (await request.body()).decode("utf-8")
+    client = get_razorpay_client()
     try:
-        body_bytes = await request.body()
-        body_str = body_bytes.decode("utf-8")
-        signature = request.headers.get("x-razorpay-signature") or request.headers.get("X-Razorpay-Signature")
-
-        if razorpay_webhook_secret:
-            if not signature:
-                raise HTTPException(400, "Missing X-Razorpay-Signature header")
-            client = get_razorpay_client()
-            client.utility.verify_webhook_signature(body_str, signature, razorpay_webhook_secret)
-
-        event_data = json.loads(body_str)
-        event_type = event_data.get("event")
-        print(f"[Razorpay Webhook] Received event: {event_type}")
-
-        if event_type in ("payment.captured", "order.paid"):
-            payload = event_data.get("payload", {})
-            payment_entity = payload.get("payment", {}).get("entity", {})
-            order_entity = payload.get("order", {}).get("entity", {})
-
-            # Extract user_id from notes, receipt, or description
-            user_id = (
-                payment_entity.get("notes", {}).get("user_id")
-                or order_entity.get("notes", {}).get("user_id")
-                or order_entity.get("receipt")
-                or payment_entity.get("description")
-            )
-
-            if user_id:
-                print(f"[Razorpay Webhook] Marking user {user_id} as is_premium=True...")
-                supabase.table("profiles").update({"is_premium": True}).eq("id", user_id).execute()
-                print(f"[Razorpay Webhook] User {user_id} is now Premium!")
-            else:
-                print("[Razorpay Webhook] Warning: Could not locate user_id in payload.")
-
+        client.utility.verify_webhook_signature(body, signature, razorpay_webhook_secret)
+        event = json.loads(body)
+        if event.get("event") in ("payment.captured", "order.paid"):
+            payment = event.get("payload", {}).get("payment", {}).get("entity", {})
+            if not payment.get("id") or not payment.get("order_id"):
+                raise HTTPException(400, "Missing payment entity")
+            owner = validate_purchase(client, payment["order_id"], payment["id"])
+            grant_premium(supabase, owner)
         return {"status": "ok"}
+    except HTTPException:
+        raise
     except razorpay.errors.SignatureVerificationError:
-        print("[Razorpay Webhook] Signature verification failed!")
         raise HTTPException(400, "Invalid webhook signature")
-    except Exception as e:
-        print(f"[Razorpay Webhook] Error processing webhook: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(500, str(e))
+    except (ValueError, KeyError):
+        raise HTTPException(400, "Invalid webhook payload")
+    except Exception:
+        raise HTTPException(503, "Unable to process payment; retry delivery.")

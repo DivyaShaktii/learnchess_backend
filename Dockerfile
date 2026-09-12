@@ -16,9 +16,8 @@ COPY . .
 # Set environment variable for stockfish path
 ENV STOCKFISH_PATH=/usr/games/stockfish
 
-# Expose port
+# Document the local default. Railway supplies PORT at runtime.
 EXPOSE 8000
 
 # Start the application
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5000"]
-
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
