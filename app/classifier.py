@@ -1,21 +1,14 @@
 """
 Move classification engine.
 
-Mirrors the category system you described:
-  1. Early plies (1-3)         -> "Book"      (known opening theory)
-  2. Ply 4-5 onward             -> real analysis kicks in, blunders start
-                                    getting flagged with a pre-move warning
-  3. Rest of the game           -> every move gets a label along a spectrum:
-                                    Brilliant / Best / Excellent / Good /
-                                    Inaccuracy / Mistake / Blunder / Worst
-
-Classification is centipawn-loss based (the standard approach used by
-chess.com / lichess-style analysis): we compare the engine's evaluation
-of the position after the played move vs. after its own top choice.
+Move quality is primarily based on centipawn loss, but labels that carry
+extra meaning use extra evidence:
+  - Book requires a known opening move that is also engine-sound.
+  - Best Move requires the engine's first choice.
+  - Brilliant requires a best/near-best move plus a sound material sacrifice.
 """
 
 import chess
-from typing import Optional
 from .engine import StockfishEngine, CP_MATE
 
 LABELS = {
@@ -43,10 +36,8 @@ BOOK_MOVES_UCI = {
 WARN_LABELS = {LABELS["INACCURACY"], LABELS["MISTAKE"], LABELS["BLUNDER"], LABELS["WORST"], LABELS["OPENING_PAWN_WARNING"]}
 BOX_LABELS = {LABELS["INACCURACY"], LABELS["MISTAKE"], LABELS["BLUNDER"], LABELS["WORST"], LABELS["OPENING_PAWN_WARNING"]}
 
-import random
-
 class MoveClassifier:
-    def __init__(self, engine: StockfishEngine, book_ply_limit: int = 3):
+    def __init__(self, engine: StockfishEngine, book_ply_limit: int = 6):
         self.engine = engine
         self.book_ply_limit = book_ply_limit
 
@@ -56,32 +47,7 @@ class MoveClassifier:
 
         played_english = self._san_to_english(board, move, san)
         
-        # 1) Book-move shortcut for the opening
-        if ply_number <= self.book_ply_limit:
-            piece = board.piece_at(move.from_square)
-            if piece and piece.piece_type == chess.PAWN:
-                file_idx = chess.square_file(move.from_square)
-                if file_idx in (0, 1, 6, 7): # a, b, g, h
-                    return {
-                        "label": LABELS["OPENING_PAWN_WARNING"],
-                        "cp_loss": 50,
-                        "best_move_san": san,
-                        "best_move_uci": uci,
-                        "top_alternatives": [],
-                        "explanation": "Build your minor pieces.",
-                    }
-
-            if uci in BOOK_MOVES_UCI:
-                msg = random.choice(["Build your minor pieces.", "Develop your center."])
-                return {
-                    "label": LABELS["OPENING_PRINCIPLE"],
-                    "cp_loss": 0,
-                    "best_move_san": san,
-                    "best_move_uci": uci,
-                    "top_alternatives": [],
-                    "explanation": msg,
-                }
-        # 2) Ask the engine for its top lines from the current position
+        # Always analyse first. Opening heuristics must never hide a real mistake.
         top_lines = self.engine.best_moves(board, n=3)
         if not top_lines or top_lines[0]["move"] is None:
             return {
@@ -94,7 +60,7 @@ class MoveClassifier:
         best_is_mate = top_lines[0]["is_mate"]
         best_uci = top_lines[0]["move"]
 
-        # 3) Evaluate the position that actually results from the played move
+        # Evaluate the position that actually results from the played move.
         played_score = self.engine.score_after_move(board, move)
         played_cp = played_score.score(mate_score=CP_MATE)
         played_is_mate = played_score.is_mate()
@@ -102,7 +68,21 @@ class MoveClassifier:
         cp_loss = self._cp_loss(best_cp, played_cp, best_is_mate, played_is_mate)
         is_top_move = (uci == best_uci)
 
-        label = self._label_from_cp_loss(cp_loss, is_top_move, board, move, played_cp)
+        label = self._label_from_cp_loss(
+            cp_loss, is_top_move, board, move, played_cp, best_cp, top_lines
+        )
+
+        if ply_number <= self.book_ply_limit:
+            piece = board.piece_at(move.from_square)
+            is_wing_pawn = (
+                piece is not None
+                and piece.piece_type == chess.PAWN
+                and chess.square_file(move.from_square) in (0, 1, 6, 7)
+            )
+            if is_wing_pawn and cp_loss >= 40:
+                label = LABELS["OPENING_PAWN_WARNING"]
+            elif uci in BOOK_MOVES_UCI and cp_loss <= 25:
+                label = LABELS["BOOK"]
 
         try:
             best_english = self._san_to_english(board, chess.Move.from_uci(best_uci), top_lines[0]["san"]) if best_uci else ""
@@ -140,25 +120,45 @@ class MoveClassifier:
             return 2000  # walked into getting mated
         return max(0, best_cp - played_cp)
 
-    def _label_from_cp_loss(self, cp_loss, is_top_move, board, move, played_cp) -> str:
+    def _label_from_cp_loss(
+        self, cp_loss, is_top_move, board, move, played_cp, best_cp, top_lines
+    ) -> str:
+        if self._is_brilliant_candidate(
+            board, move, cp_loss, played_cp, best_cp, top_lines
+        ):
+            return LABELS["BRILLIANT"]
         if is_top_move:
+            return LABELS["BEST"]
+        if cp_loss <= 20:
+            return LABELS["EXCELLENT"]
+        if cp_loss <= 60:
             return LABELS["GOOD"]
-        if cp_loss <= 40:
-            return LABELS["GOOD"]
-        if cp_loss <= 90:
+        if cp_loss <= 120:
             return LABELS["INACCURACY"]
-        if cp_loss <= 180:
+        if cp_loss <= 250:
             return LABELS["MISTAKE"]
-        if cp_loss <= 350:
+        if cp_loss <= 500:
             return LABELS["BLUNDER"]
         return LABELS["WORST"]
 
-    def _is_brilliant_candidate(self, board: chess.Board, move: chess.Move, played_cp: int) -> bool:
-        """Heuristic 'brilliant' detector: the engine's top choice, it gives up
-        material, the sacrificed piece is left on an attacked square, and the
-        position wasn't already completely winning beforehand (so it's a real
-        turning point, not just mopping up)."""
-        piece_values = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9}
+    def _is_brilliant_candidate(
+        self, board: chess.Board, move: chess.Move, cp_loss: int,
+        played_cp: int, best_cp: int, top_lines: list[dict]
+    ) -> bool:
+        """Return true only for an engine-sound material sacrifice.
+
+        CP loss alone cannot make a move brilliant. The move must remain within
+        15 cp of the engine's best evaluation and intentionally concede at least
+        two material points either immediately or in the validated principal
+        variation. Positions that remain clearly losing are excluded.
+        """
+        if cp_loss > 15 or played_cp < -100 or best_cp < -100:
+            return False
+
+        piece_values = {
+            chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3,
+            chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 0,
+        }
         moving_piece = board.piece_at(move.from_square)
         if moving_piece is None:
             return False
@@ -168,15 +168,52 @@ class MoveClassifier:
 
         temp_board = board.copy()
         temp_board.push(move)
-        is_attacked = temp_board.is_attacked_by(not board.turn, move.to_square)
+        can_be_captured = any(
+            reply.to_square == move.to_square and temp_board.is_capture(reply)
+            for reply in temp_board.legal_moves
+        )
+        direct_sacrifice = can_be_captured and gives_up_value - gains_value >= 2
 
-        sacrifices = is_attacked and gives_up_value > gains_value
-        not_already_crushing = abs(played_cp) < 600
-        return sacrifices and not_already_crushing
+        mover = board.turn
+        initial_balance = self._material_balance(board, mover, piece_values)
+        minimum_balance = initial_balance
+        matching_line = next(
+            (line for line in top_lines if line.get("move") == move.uci()), None
+        )
+        variation = (matching_line or {}).get("pv", [])[:4]
+        variation_board = board.copy()
+        for uci in variation:
+            try:
+                variation_board.push_uci(uci)
+            except (ValueError, AssertionError):
+                break
+            minimum_balance = min(
+                minimum_balance,
+                self._material_balance(variation_board, mover, piece_values),
+            )
+
+        variation_sacrifice = initial_balance - minimum_balance >= 2
+        return direct_sacrifice or variation_sacrifice
+
+    @staticmethod
+    def _material_balance(board: chess.Board, color: chess.Color, piece_values: dict) -> int:
+        own = sum(
+            len(board.pieces(piece_type, color)) * value
+            for piece_type, value in piece_values.items()
+        )
+        opponent = sum(
+            len(board.pieces(piece_type, not color)) * value
+            for piece_type, value in piece_values.items()
+        )
+        return own - opponent
 
     def _explain(self, label, played_san, best_san, cp_loss) -> str:
-        if label in (LABELS["BOOK"], LABELS["BEST"], LABELS["BRILLIANT"]):
+        if label == LABELS["BRILLIANT"]:
+            return f"{played_san} is a sound sacrifice that preserves the best continuation."
+        if label in (LABELS["BOOK"], LABELS["BEST"]):
             return f"{played_san} is a great choice."
+        if label == LABELS["OPENING_PAWN_WARNING"]:
+            return "That early wing-pawn move loses time. Develop a piece or contest the center instead."
         return (
             f"{played_san} gives up roughly {cp_loss} centipawns of advantage "
             f"compared to the strongest move here, {best_san}."
