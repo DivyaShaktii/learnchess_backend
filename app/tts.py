@@ -115,5 +115,14 @@ class KokoroSpeechService:
             return audio, False
 
     def warm(self) -> None:
-        self.synthesize("Coach ready.", voice=self.default_voice)
-
+        # Generate the latency-sensitive warning phrases first. These are used
+        # when the Play Anyway popup opens, so they should already be cached.
+        for text in (
+            "That is a slight inaccuracy.",
+            "Hold on, that is a mistake. Take a moment to find a better move.",
+            "That is a blunder.",
+            "That is a serious blunder.",
+            "Hold it, genius. That move deserves another look.",
+            "Watch out! Here is their plan.",
+        ):
+            self.synthesize(text, voice=self.default_voice)
