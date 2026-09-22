@@ -7,3 +7,4 @@ razorpay==2.0.1
 supabase==2.5.0
 python-dotenv==1.0.1
 gunicorn
+kokoro>=0.9.4,<1.0

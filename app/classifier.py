@@ -2,12 +2,15 @@
 Move classification engine.
 
 Move quality is primarily based on centipawn loss, but labels that carry
-extra meaning use extra evidence:
+extra meaning use extra evidence. Severity uses change in expected winning
+chances, not a flat CP table, so the same CP loss matters much more in an
+equal position than it does when one side is already overwhelmingly ahead:
   - Book requires a known opening move that is also engine-sound.
   - Best Move requires the engine's first choice.
   - Brilliant requires a best/near-best move plus a sound material sacrifice.
 """
 
+import math
 import chess
 from .engine import StockfishEngine, CP_MATE
 
@@ -66,10 +69,14 @@ class MoveClassifier:
         played_is_mate = played_score.is_mate()
 
         cp_loss = self._cp_loss(best_cp, played_cp, best_is_mate, played_is_mate)
+        best_win_probability = self._win_probability(best_cp)
+        played_win_probability = self._win_probability(played_cp)
+        win_probability_loss = max(0.0, best_win_probability - played_win_probability)
         is_top_move = (uci == best_uci)
 
         label = self._label_from_cp_loss(
-            cp_loss, is_top_move, board, move, played_cp, best_cp, top_lines
+            cp_loss, win_probability_loss, is_top_move, board, move,
+            played_cp, best_cp, best_is_mate, played_is_mate, top_lines
         )
 
         if ply_number <= self.book_ply_limit:
@@ -109,9 +116,24 @@ class MoveClassifier:
             "best_eval_cp": best_cp,
             "best_move_uci": best_uci,
             "best_move_san": top_lines[0]["san"],
+            "best_win_probability": round(best_win_probability, 2),
+            "played_win_probability": round(played_win_probability, 2),
+            "win_probability_loss": round(win_probability_loss, 2),
             "top_alternatives": safe_alternatives,
-            "explanation": self._explain(label, played_english, best_english, cp_loss),
+            "explanation": self._explain(
+                label, played_english, best_english, cp_loss, win_probability_loss
+            ),
         }
+
+    @staticmethod
+    def _win_probability(cp: int) -> float:
+        """Convert mover-relative evaluation to expected score (0-100).
+
+        This is the Lichess/scalachess logistic evaluation curve, clamped at
+        +/-1000cp where practical winning chances have saturated.
+        """
+        bounded_cp = max(-1000, min(1000, cp))
+        return 50 + 50 * (2 / (1 + math.exp(-0.00368208 * bounded_cp)) - 1)
 
     def _cp_loss(self, best_cp, played_cp, best_mate, played_mate) -> int:
         if best_mate and not played_mate:
@@ -121,7 +143,8 @@ class MoveClassifier:
         return max(0, best_cp - played_cp)
 
     def _label_from_cp_loss(
-        self, cp_loss, is_top_move, board, move, played_cp, best_cp, top_lines
+        self, cp_loss, win_probability_loss, is_top_move, board, move,
+        played_cp, best_cp, best_is_mate, played_is_mate, top_lines
     ) -> str:
         if self._is_brilliant_candidate(
             board, move, cp_loss, played_cp, best_cp, top_lines
@@ -129,15 +152,19 @@ class MoveClassifier:
             return LABELS["BRILLIANT"]
         if is_top_move:
             return LABELS["BEST"]
-        if cp_loss <= 20:
+        if (best_is_mate and not played_is_mate) or (
+            played_is_mate and played_cp < 0
+        ):
+            return LABELS["WORST"]
+        if cp_loss <= 20 and win_probability_loss <= 1:
             return LABELS["EXCELLENT"]
-        if cp_loss <= 60:
+        if win_probability_loss <= 2.5:
             return LABELS["GOOD"]
-        if cp_loss <= 120:
+        if win_probability_loss <= 7:
             return LABELS["INACCURACY"]
-        if cp_loss <= 250:
+        if win_probability_loss <= 15:
             return LABELS["MISTAKE"]
-        if cp_loss <= 500:
+        if win_probability_loss <= 30:
             return LABELS["BLUNDER"]
         return LABELS["WORST"]
 
@@ -207,7 +234,7 @@ class MoveClassifier:
         )
         return own - opponent
 
-    def _explain(self, label, played_san, best_san, cp_loss) -> str:
+    def _explain(self, label, played_san, best_san, cp_loss, win_probability_loss) -> str:
         if label == LABELS["BRILLIANT"]:
             return f"{played_san} is a sound sacrifice that preserves the best continuation."
         if label in (LABELS["BOOK"], LABELS["BEST"]):
@@ -215,8 +242,9 @@ class MoveClassifier:
         if label == LABELS["OPENING_PAWN_WARNING"]:
             return "That early wing-pawn move loses time. Develop a piece or contest the center instead."
         return (
-            f"{played_san} gives up roughly {cp_loss} centipawns of advantage "
-            f"compared to the strongest move here, {best_san}."
+            f"{played_san} reduces expected winning chances by about "
+            f"{win_probability_loss:.1f} percentage points ({cp_loss} centipawns) "
+            f"compared with {best_san}."
         )
 
     def _san_to_english(self, board: chess.Board, move: chess.Move, san: str) -> str:
