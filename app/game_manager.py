@@ -8,7 +8,7 @@ from typing import Dict, Optional
 
 from .engine import StockfishEngine
 from .classifier import MoveClassifier, WARN_LABELS, BOX_LABELS
-from .coach_analysis import build_explanation
+from .coach_analysis import build_explanation, is_benign_exchange
 from .tablebase import TablebaseClient
 from supabase import Client
 import json
@@ -170,6 +170,30 @@ class GameManager:
             result["refutation_sequence"] = threat.get("resulting_pv", [])
             result["warning_message"] = self._build_warning(classification, threat, board, move)
 
+            # Apply the same all-piece exchange safeguard to legacy games
+            # during rollout. Otherwise a game outside the v2 percentage could
+            # still show the exact false popup this analysis prevents.
+            if not use_v2:
+                exchange_check = build_explanation(
+                    board, move, classification["label"],
+                    classification.get("win_probability_loss", 0),
+                    result["refutation_sequence"], classification.get("best_move_san"),
+                    classification.get("game_phase", "middlegame"),
+                    opening=classification.get("opening"),
+                )
+                if is_benign_exchange(exchange_check):
+                    classification["engine_label"] = classification["label"]
+                    classification["label"] = "Good"
+                    result.update({
+                        "label": "Good",
+                        "engine_label": classification["engine_label"],
+                        "should_warn": False,
+                        "is_box_tier": False,
+                        "threat_preview": None,
+                        "refutation_sequence": [],
+                        "warning_message": None,
+                    })
+
         if use_v2:
             analysis_id = str(uuid.uuid4())
             mate_reason = tablebase_reason
@@ -183,6 +207,17 @@ class GameManager:
                 mate_reason=mate_reason,
                 opening=classification.get("opening"),
             )
+            if classification["label"] in {"Inaccuracy", "Mistake", "Blunder", "Worst Move"} and is_benign_exchange(explanation):
+                classification["engine_label"] = classification["label"]
+                classification["label"] = "Good"
+                result["label"] = "Good"
+                result["engine_label"] = classification["engine_label"]
+                explanation = build_explanation(
+                    board, move, "Good",
+                    classification.get("win_probability_loss", 0), continuation,
+                    classification.get("best_move_san"), classification.get("game_phase", "middlegame"),
+                    opening=classification.get("opening"),
+                )
             explanation["analysis_id"] = analysis_id
             if tablebase_reason:
                 explanation.update({

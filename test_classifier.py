@@ -23,10 +23,10 @@ class FakeEngine:
         self.played_cp = played_cp
         self.played_mate = played_mate
 
-    def best_moves(self, board, n=3):
+    def best_moves(self, board, n=3, depth=None):
         return self.lines
 
-    def score_after_move(self, board, move):
+    def score_after_move(self, board, move, depth=None):
         return FakeScore(self.played_cp, self.played_mate)
 
 
@@ -126,6 +126,17 @@ class MoveClassifierTests(unittest.TestCase):
             board, chess.Move.from_uci("b5c6"), 13, use_v2=True
         )
         self.assertEqual(result["label"], "Only Move")
+
+    def test_pawn_move_is_not_brilliant_because_material_drops_later_in_pv(self):
+        board = chess.Board()
+        engine = FakeEngine([
+            line("e2e4", 30, ["e2e4", "d7d5", "e4d5", "d8d5", "f1c4", "d5c4"]),
+            line("d2d4", -100),
+        ], 30)
+        result = MoveClassifier(engine).classify_move(
+            board, chess.Move.from_uci("e2e4"), 1, use_v2=True
+        )
+        self.assertNotEqual(result["label"], "Brilliant")
 
 
 if __name__ == "__main__":

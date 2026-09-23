@@ -54,7 +54,11 @@ class MoveClassifier:
         played_english = self._san_to_english(board, move, san)
         
         # Always analyse first. Opening heuristics must never hide a real mistake.
-        top_lines = self.engine.best_moves(board, n=5)
+        # Captures are especially vulnerable to shallow horizon noise. Give
+        # exchanges two extra plies so both the best line and played move are
+        # compared after the likely recapture sequence has had time to settle.
+        exchange_depth = 16 if board.is_capture(move) else None
+        top_lines = self.engine.best_moves(board, n=5, depth=exchange_depth)
         if not top_lines or top_lines[0]["move"] is None:
             return {
                 "label": LABELS["BEST"], "cp_loss": 0,
@@ -67,7 +71,7 @@ class MoveClassifier:
         best_uci = top_lines[0]["move"]
 
         # Evaluate the position that actually results from the played move.
-        played_score = self.engine.score_after_move(board, move)
+        played_score = self.engine.score_after_move(board, move, depth=exchange_depth)
         played_cp = played_score.score(mate_score=CP_MATE)
         played_is_mate = played_score.is_mate()
 
@@ -281,7 +285,10 @@ class MoveClassifier:
                 break
         settled_balance = self._material_balance(variation_board, mover, piece_values)
         variation_sacrifice = bool(variation) and initial_balance - settled_balance >= 2
-        return variation_sacrifice if variation else direct_sacrifice
+        # The candidate itself must deliberately offer the moved piece for at
+        # least a two-point concession. Material dropped by some unrelated
+        # later move in the PV cannot make an ordinary pawn trade Brilliant.
+        return direct_sacrifice and (variation_sacrifice if variation else True)
 
     @staticmethod
     def _material_balance(board: chess.Board, color: chess.Color, piece_values: dict) -> int:

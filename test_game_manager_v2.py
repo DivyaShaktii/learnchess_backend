@@ -16,6 +16,31 @@ class DummyClassifier:
         }
 
 
+class WarningClassifier:
+    def classify_move(self, board, move, ply_number, use_v2=False):
+        return {
+            "label": "Blunder",
+            "cp_loss": 180,
+            "win_probability_loss": 20,
+            "best_move_san": "Kf2",
+            "analysis_version": "v2" if use_v2 else "v1",
+            "top_alternatives": [],
+            "explanation": "Engine warning",
+        }
+
+
+class ExchangeEngine:
+    def threat_preview(self, board, move, depth=None):
+        return {
+            "opponent_best_reply": "c6d5",
+            "opponent_best_reply_san": "cxd5",
+            "resulting_pv": ["c6d5", "e1f2", "e8f7"],
+            "score_after_reply_cp": -180,
+            "is_mate_threat": False,
+            "mate_in": None,
+        }
+
+
 class GameManagerV2Tests(unittest.TestCase):
     def setUp(self):
         self.manager = GameManager(None, None, DummyClassifier())
@@ -65,6 +90,16 @@ class GameManagerV2Tests(unittest.TestCase):
             self.assertFalse(self.manager._v2_enabled("any-game"))
         with patch.dict(os.environ, {"COACH_V2_ROLLOUT_PERCENT": "100"}):
             self.assertTrue(self.manager._v2_enabled("any-game"))
+
+    def test_legacy_rollout_game_suppresses_false_equal_pawn_trade_warning(self):
+        manager = GameManager(ExchangeEngine(), None, WarningClassifier())
+        manager.games["trade-game"] = Game("4k3/8/2p5/3p4/4P3/8/8/4K3 w - - 0 1")
+        with patch.dict(os.environ, {"COACH_V2_ROLLOUT_PERCENT": "0"}):
+            result = manager.precheck_move("trade-game", "e4d5")
+        self.assertEqual(result["label"], "Good")
+        self.assertEqual(result["engine_label"], "Blunder")
+        self.assertFalse(result["should_warn"])
+        self.assertIsNone(result["warning_message"])
 
 
 if __name__ == "__main__":

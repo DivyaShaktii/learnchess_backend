@@ -13,6 +13,17 @@ PIECE_NAMES = {
     chess.ROOK: "rook", chess.QUEEN: "queen", chess.KING: "king",
 }
 CENTER = {chess.D4, chess.E4, chess.D5, chess.E5}
+HARMFUL_POSITIONAL_FACTORS = {
+    "active_piece_exchange",
+    "weakened_king_defense",
+    "lost_king_defender",
+    "damaged_pawn_structure",
+    "lost_bishop_pair",
+    "loss_of_outpost",
+    "lost_passed_pawn",
+    "loss_of_development",
+    "loss_of_tempo",
+}
 
 
 def game_phase(board: chess.Board, opening: dict | None = None) -> str:
@@ -246,6 +257,28 @@ def interruption_policy(label: str, probability_loss: float, confidence: float, 
     }
 
 
+def is_benign_exchange(explanation: dict) -> bool:
+    """Return true only for a verified, settled trade with no adverse evidence.
+
+    This deliberately works for every piece type. It is used to prevent a
+    shallow engine fluctuation from turning a plain pawn, minor-piece, rook,
+    queen, or mixed-material exchange into a misleading warning.
+    """
+    material = explanation.get("material") or {}
+    factors = set(explanation.get("positional_factors") or [])
+    return bool(
+        material.get("exchange_complete")
+        and material.get("gained", 0) > 0
+        and material.get("lost", 0) > 0
+        and material.get("net", 0) >= 0
+        and not explanation.get("tactical_theme")
+        and explanation.get("primary_reason") not in {
+            "missed_mate", "allows_mate", "tablebase_outcome_change", "king_danger",
+        }
+        and not factors.intersection(HARMFUL_POSITIONAL_FACTORS)
+    )
+
+
 def build_explanation(
     board: chess.Board, move: chess.Move, label: str, probability_loss: float,
     continuation: list[str], best_move_san: str | None, phase: str,
@@ -261,7 +294,12 @@ def build_explanation(
         reason, confidence = mate_reason, 1.0
     elif material["exchange_complete"] and material["net"] < 0:
         reason, confidence = "material_loss", 0.95
-    elif material["exchange_complete"] and material["gained"] and material["net"] == 0 and factors:
+    elif (
+        material["exchange_complete"]
+        and material["gained"]
+        and material["net"] == 0
+        and set(factors).intersection(HARMFUL_POSITIONAL_FACTORS)
+    ):
         reason, confidence = "equal_but_unfavorable_exchange", 0.82
     elif tactic:
         reason, confidence = tactic, 0.9
@@ -291,6 +329,16 @@ def build_explanation(
     elif reason == "equal_but_unfavorable_exchange":
         summary = "The material stays equal, but the exchange worsens your position."
         follow_up = f"The trade is equal in material, but it gives up your more useful piece.{best_text}"
+    elif (
+        material["exchange_complete"]
+        and material["gained"] > 0
+        and material["lost"] > 0
+        and material["net"] >= 0
+        and not set(factors).intersection(HARMFUL_POSITIONAL_FACTORS)
+        and not tactic
+    ):
+        summary = "This is a balanced material exchange."
+        follow_up = "The analyzed capture sequence finishes without a verified material or positional loss."
     elif reason == "king_danger":
         summary = "This move increases the pressure around your king."
         follow_up = f"The continuation weakens your king's protection.{best_text}"
