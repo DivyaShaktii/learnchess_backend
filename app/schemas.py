@@ -13,6 +13,12 @@ class PreMoveCheckRequest(BaseModel):
     move_uci: str  # e.g. "e2e4"
 
 
+class MoveExplainRequest(BaseModel):
+    game_id: str
+    move_uci: str
+    analysis_id: str
+
+
 class MoveAlternative(BaseModel):
     move: Optional[str] = None
     san: Optional[str] = None
@@ -48,6 +54,13 @@ class PreMoveCheckResponse(BaseModel):
     best_win_probability: Optional[float] = None
     played_win_probability: Optional[float] = None
     win_probability_loss: Optional[float] = None
+    analysis_version: str = "v1"
+    analysis_id: Optional[str] = None
+    game_phase: Optional[str] = None
+    opening: Optional[dict] = None
+    evaluation_source: str = "stockfish"
+    coach_explanation: Optional[dict] = None
+    analysis_ms: Optional[int] = None
 
 
 class SpeechRequest(BaseModel):
@@ -59,6 +72,7 @@ class SpeechRequest(BaseModel):
 class CommitMoveRequest(BaseModel):
     game_id: str
     move_uci: str
+    analysis_id: Optional[str] = None
 
 
 class CommitMoveResponse(BaseModel):

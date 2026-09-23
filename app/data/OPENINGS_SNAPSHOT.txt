@@ -1,0 +1,4 @@
+Source: https://github.com/lichess-org/chess-openings
+Commit: c67912be581f0793dbaa776be5ccf111e01f88d9
+License: CC0-1.0
+Format: normalized EPD, ECO code, and canonical opening name

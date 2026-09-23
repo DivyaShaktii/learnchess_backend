@@ -107,6 +107,26 @@ class MoveClassifierTests(unittest.TestCase):
         )
         self.assertEqual(result["label"], "Worst Move")
 
+    def test_v2_top_move_with_tied_alternative_is_excellent(self):
+        board = chess.Board()
+        engine = FakeEngine([line("e2e4", 30), line("d2d4", 29)], 30)
+        result = MoveClassifier(engine).classify_move(
+            board, chess.Move.from_uci("e2e4"), 7, use_v2=True
+        )
+        # The opening database may identify e4 as Book; outside the opening it
+        # would be Excellent because the alternatives are effectively tied.
+        self.assertIn(result["label"], {"Book", "Excellent"})
+
+    def test_v2_large_alternative_gap_marks_only_move(self):
+        board = chess.Board()
+        for move in ("e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "a7a6"):
+            board.push_uci(move)
+        engine = FakeEngine([line("b5c6", 350), line("b5a4", 0)], 350)
+        result = MoveClassifier(engine).classify_move(
+            board, chess.Move.from_uci("b5c6"), 13, use_v2=True
+        )
+        self.assertEqual(result["label"], "Only Move")
+
 
 if __name__ == "__main__":
     unittest.main()

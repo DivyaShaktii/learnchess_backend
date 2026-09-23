@@ -13,6 +13,8 @@ equal position than it does when one side is already overwhelmingly ahead:
 import math
 import chess
 from .engine import StockfishEngine, CP_MATE
+from .opening_book import OpeningBook
+from .coach_analysis import game_phase
 
 LABELS = {
     "BOOK": "Book",
@@ -40,18 +42,19 @@ WARN_LABELS = {LABELS["INACCURACY"], LABELS["MISTAKE"], LABELS["BLUNDER"], LABEL
 BOX_LABELS = {LABELS["INACCURACY"], LABELS["MISTAKE"], LABELS["BLUNDER"], LABELS["WORST"], LABELS["OPENING_PAWN_WARNING"]}
 
 class MoveClassifier:
-    def __init__(self, engine: StockfishEngine, book_ply_limit: int = 6):
+    def __init__(self, engine: StockfishEngine, book_ply_limit: int = 6, opening_book: OpeningBook | None = None):
         self.engine = engine
         self.book_ply_limit = book_ply_limit
+        self.opening_book = opening_book or OpeningBook()
 
-    def classify_move(self, board: chess.Board, move: chess.Move, ply_number: int) -> dict:
+    def classify_move(self, board: chess.Board, move: chess.Move, ply_number: int, use_v2: bool = False) -> dict:
         san = board.san(move)
         uci = move.uci()
 
         played_english = self._san_to_english(board, move, san)
         
         # Always analyse first. Opening heuristics must never hide a real mistake.
-        top_lines = self.engine.best_moves(board, n=3)
+        top_lines = self.engine.best_moves(board, n=5)
         if not top_lines or top_lines[0]["move"] is None:
             return {
                 "label": LABELS["BEST"], "cp_loss": 0,
@@ -73,13 +76,29 @@ class MoveClassifier:
         played_win_probability = self._win_probability(played_cp)
         win_probability_loss = max(0.0, best_win_probability - played_win_probability)
         is_top_move = (uci == best_uci)
+        opening_match = self.opening_book.identify_after(board, move)
+        phase = game_phase(board, opening_match.as_dict() if opening_match else None)
+        second_cp = top_lines[1]["score_cp"] if len(top_lines) > 1 else best_cp
+        second_probability = self._win_probability(second_cp)
+        alternative_gap = max(0.0, best_win_probability - second_probability)
 
-        label = self._label_from_cp_loss(
-            cp_loss, win_probability_loss, is_top_move, board, move,
-            played_cp, best_cp, best_is_mate, played_is_mate, top_lines
-        )
+        if use_v2:
+            label = self._label_v2(
+                cp_loss, win_probability_loss, alternative_gap, is_top_move,
+                board, move, played_cp, best_cp, best_is_mate,
+                played_is_mate, top_lines, phase,
+            )
+        else:
+            label = self._label_from_cp_loss(
+                cp_loss, win_probability_loss, is_top_move, board, move,
+                played_cp, best_cp, best_is_mate, played_is_mate, top_lines
+            )
 
-        if ply_number <= self.book_ply_limit:
+        if use_v2 and opening_match and cp_loss <= 30 and win_probability_loss <= 2.5 and label not in {
+            LABELS["BRILLIANT"], "Only Move", "Great Move"
+        }:
+            label = LABELS["BOOK"]
+        elif not use_v2 and ply_number <= self.book_ply_limit:
             piece = board.piece_at(move.from_square)
             is_wing_pawn = (
                 piece is not None
@@ -119,11 +138,53 @@ class MoveClassifier:
             "best_win_probability": round(best_win_probability, 2),
             "played_win_probability": round(played_win_probability, 2),
             "win_probability_loss": round(win_probability_loss, 2),
+            "alternative_gap": round(alternative_gap, 2),
+            "game_phase": phase,
+            "opening": opening_match.as_dict() if opening_match else None,
+            "analysis_version": "v2" if use_v2 else "v1",
             "top_alternatives": safe_alternatives,
             "explanation": self._explain(
                 label, played_english, best_english, cp_loss, win_probability_loss
             ),
         }
+
+    def _label_v2(
+        self, cp_loss, probability_loss, alternative_gap, is_top_move,
+        board, move, played_cp, best_cp, best_is_mate, played_is_mate,
+        top_lines, phase,
+    ) -> str:
+        if (best_is_mate and not played_is_mate) or (played_is_mate and played_cp < 0):
+            return LABELS["WORST"]
+        if self._is_brilliant_candidate(board, move, cp_loss, played_cp, best_cp, top_lines):
+            # A brilliant move must also be meaningfully difficult to replace.
+            if alternative_gap >= 4 or best_is_mate:
+                return LABELS["BRILLIANT"]
+        if is_top_move:
+            if alternative_gap >= 10:
+                return "Only Move"
+            if alternative_gap >= 4:
+                return "Great Move"
+            if alternative_gap >= 1:
+                return LABELS["BEST"]
+            return LABELS["EXCELLENT"]
+
+        thresholds = {
+            "opening": (1.5, 30, 4, 8, 16, 30),
+            "middlegame": (1, 20, 2.5, 7, 15, 30),
+            "endgame": (1, 20, 2.5, 5, 10, 20),
+        }[phase]
+        excellent_wp, excellent_cp, good, inaccurate, mistake, blunder = thresholds
+        if probability_loss <= excellent_wp and cp_loss <= excellent_cp:
+            return LABELS["EXCELLENT"]
+        if probability_loss <= good:
+            return LABELS["GOOD"]
+        if probability_loss <= inaccurate:
+            return LABELS["INACCURACY"]
+        if probability_loss <= mistake:
+            return LABELS["MISTAKE"]
+        if probability_loss <= blunder:
+            return LABELS["BLUNDER"]
+        return LABELS["WORST"]
 
     @staticmethod
     def _win_probability(cp: int) -> float:
@@ -179,7 +240,8 @@ class MoveClassifier:
         two material points either immediately or in the validated principal
         variation. Positions that remain clearly losing are excluded.
         """
-        if cp_loss > 15 or played_cp < -100 or best_cp < -100:
+        probability_loss = self._win_probability(best_cp) - self._win_probability(played_cp)
+        if cp_loss > 15 or probability_loss > 1 or played_cp < -100 or best_cp < -100 or best_cp > 1000:
             return False
 
         piece_values = {
@@ -188,6 +250,10 @@ class MoveClassifier:
         }
         moving_piece = board.piece_at(move.from_square)
         if moving_piece is None:
+            return False
+        if board.move_stack and board.is_capture(move) and board.peek().to_square == move.to_square:
+            # Simply taking back the piece captured on the previous move is an
+            # ordinary recapture, not an intentional sacrifice.
             return False
         captured = board.piece_at(move.to_square)
         gives_up_value = piece_values.get(moving_piece.piece_type, 0)
@@ -203,24 +269,19 @@ class MoveClassifier:
 
         mover = board.turn
         initial_balance = self._material_balance(board, mover, piece_values)
-        minimum_balance = initial_balance
         matching_line = next(
             (line for line in top_lines if line.get("move") == move.uci()), None
         )
-        variation = (matching_line or {}).get("pv", [])[:4]
+        variation = (matching_line or {}).get("pv", [])[:8]
         variation_board = board.copy()
         for uci in variation:
             try:
                 variation_board.push_uci(uci)
             except (ValueError, AssertionError):
                 break
-            minimum_balance = min(
-                minimum_balance,
-                self._material_balance(variation_board, mover, piece_values),
-            )
-
-        variation_sacrifice = initial_balance - minimum_balance >= 2
-        return direct_sacrifice or variation_sacrifice
+        settled_balance = self._material_balance(variation_board, mover, piece_values)
+        variation_sacrifice = bool(variation) and initial_balance - settled_balance >= 2
+        return variation_sacrifice if variation else direct_sacrifice
 
     @staticmethod
     def _material_balance(board: chess.Board, color: chess.Color, piece_values: dict) -> int:

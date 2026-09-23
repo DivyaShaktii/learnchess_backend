@@ -170,7 +170,7 @@ class StockfishEngine:
                 "score_cp": score.score(mate_score=CP_MATE),
                 "is_mate": score.is_mate(),
                 "mate_in": score.mate() if score.is_mate() else None,
-                "pv": [m.uci() for m in pv[:5]],
+                "pv": [m.uci() for m in pv[:9]],
             })
         return results
 
@@ -198,7 +198,7 @@ class StockfishEngine:
         return {
             "opponent_best_reply": reply.uci() if reply else None,
             "opponent_best_reply_san": new_board.san(reply) if reply else None,
-            "resulting_pv": [m.uci() for m in pv[:6]],
+            "resulting_pv": [m.uci() for m in pv[:9]],
             "score_after_reply_cp": score.score(mate_score=CP_MATE),
             "is_mate_threat": score.is_mate(),
             "mate_in": score.mate() if score.is_mate() else None,

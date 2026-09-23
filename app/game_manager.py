@@ -1,10 +1,15 @@
 import uuid
+import hashlib
+import os
+import time
 import chess
 import chess.pgn
 from typing import Dict, Optional
 
 from .engine import StockfishEngine
 from .classifier import MoveClassifier, WARN_LABELS, BOX_LABELS
+from .coach_analysis import build_explanation
+from .tablebase import TablebaseClient
 from supabase import Client
 import json
 
@@ -16,6 +21,8 @@ class Game:
         self.opponent_rating = opponent_rating
         self.last_precheck_move_uci = None
         self.last_precheck_classification = None
+        self.last_analysis_id = None
+        self.analyses: Dict[str, dict] = {}
         self.user_id = None
 
     @property
@@ -30,7 +37,17 @@ class GameManager:
         self.opponent_engine = opponent_engine
         self.classifier = classifier
         self.supabase = supabase
+        self.tablebase = TablebaseClient()
         self.games: Dict[str, Game] = {}
+
+    @staticmethod
+    def _v2_enabled(game_id: str) -> bool:
+        try:
+            percent = max(0, min(100, int(os.getenv("COACH_V2_ROLLOUT_PERCENT", "0"))))
+        except ValueError:
+            percent = 0
+        bucket = int(hashlib.sha256(game_id.encode()).hexdigest()[:8], 16) % 100
+        return bucket < percent
 
     # -- lifecycle -----------------------------------------------------
     def new_game(self, starting_fen: Optional[str] = None, opponent_rating: Optional[int] = 1500, user_id: str = None) -> str:
@@ -107,11 +124,35 @@ class GameManager:
 
     # -- core feature: check a move BEFORE it's committed --------------
     def precheck_move(self, game_id: str, move_uci: str) -> dict:
+        started = time.perf_counter()
         game = self.get_game(game_id)
         board = game.board
         move = self._parse_move(board, move_uci)
+        use_v2 = self._v2_enabled(game_id)
 
-        classification = self.classifier.classify_move(board, move, game.next_ply)
+        classification = self.classifier.classify_move(board, move, game.next_ply, use_v2=use_v2)
+        evaluation_source = "stockfish"
+        tablebase_reason = None
+        if use_v2 and self.tablebase.eligible(board):
+            before_tb = self.tablebase.probe(board)
+            after_board = board.copy()
+            after_board.push(move)
+            after_tb = self.tablebase.probe(after_board)
+            if before_tb and after_tb:
+                rank = {"win": 1, "cursed-win": 1, "draw": 0, "blessed-loss": -1, "loss": -1}
+                best_result = rank.get(before_tb.get("category"))
+                after_for_opponent = rank.get(after_tb.get("category"))
+                played_result = -after_for_opponent if after_for_opponent is not None else None
+                if best_result is not None and played_result is not None:
+                    evaluation_source = "tablebase"
+                    if best_result == 1 and played_result == -1:
+                        classification["label"] = "Worst Move"
+                    elif best_result == 0 and played_result == -1:
+                        classification["label"] = "Blunder"
+                    elif best_result == 1 and played_result == 0:
+                        classification["label"] = "Mistake"
+                    if played_result < best_result:
+                        tablebase_reason = "tablebase_outcome_change"
         game.last_precheck_move_uci = move_uci
         game.last_precheck_classification = classification
 
@@ -124,11 +165,100 @@ class GameManager:
         result["warning_message"] = None
 
         if should_warn:
-            threat = self.engine.threat_preview(board, move)
+            threat = self.engine.threat_preview(board, move, depth=10 if use_v2 else None)
             result["threat_preview"] = threat
             result["refutation_sequence"] = threat.get("resulting_pv", [])
             result["warning_message"] = self._build_warning(classification, threat, board, move)
 
+        if use_v2:
+            analysis_id = str(uuid.uuid4())
+            mate_reason = tablebase_reason
+            if not mate_reason and classification["label"] == "Worst Move":
+                mate_reason = "missed_mate" if classification.get("best_eval_cp") == 100000 else None
+            continuation = result.get("refutation_sequence") or []
+            explanation = build_explanation(
+                board, move, classification["label"],
+                classification.get("win_probability_loss", 0), continuation,
+                classification.get("best_move_san"), classification.get("game_phase", "middlegame"),
+                mate_reason=mate_reason,
+                opening=classification.get("opening"),
+            )
+            explanation["analysis_id"] = analysis_id
+            if tablebase_reason:
+                explanation.update({
+                    "primary_reason": tablebase_reason,
+                    "confidence": {"score": 1.0, "tier": "high"},
+                    "summary": "This move changes the exact tablebase result.",
+                    "detail": "Perfect endgame play changes the expected win, draw, or loss after this move.",
+                })
+            result.update({
+                "analysis_version": "v2",
+                "analysis_id": analysis_id,
+                "evaluation_source": evaluation_source,
+                "coach_explanation": explanation,
+                "should_warn": explanation["interruption"]["normal"] == "popup",
+                "is_box_tier": explanation["interruption"]["normal"] == "popup",
+            })
+            game.last_analysis_id = analysis_id
+            game.analyses.clear()
+            game.analyses[analysis_id] = {
+                "fen": board.fen(), "move_uci": move_uci,
+                "classification": classification, "result": result,
+                "mate_reason": mate_reason,
+                "evaluation_source": evaluation_source,
+            }
+
+        result["analysis_ms"] = round((time.perf_counter() - started) * 1000)
+        print(json.dumps({
+            "event": "coach_precheck",
+            "game_id": game_id,
+            "analysis_id": result.get("analysis_id"),
+            "analysis_version": result.get("analysis_version", "v1"),
+            "classification": result.get("label"),
+            "evaluation_source": result.get("evaluation_source", "stockfish"),
+            "duration_ms": result["analysis_ms"],
+        }))
+
+        return result
+
+    def explain_move(self, game_id: str, move_uci: str, analysis_id: str) -> dict:
+        started = time.perf_counter()
+        game = self.get_game(game_id)
+        cached = game.analyses.get(analysis_id)
+        if not cached or cached["fen"] != game.board.fen() or cached["move_uci"] != move_uci:
+            raise ValueError("This analysis is stale. Recheck the move in the current position.")
+        move = self._parse_move(game.board, move_uci)
+        threat = self.engine.threat_preview(game.board, move, depth=16)
+        classification = cached["classification"]
+        explanation = build_explanation(
+            game.board, move, classification["label"],
+            classification.get("win_probability_loss", 0), threat.get("resulting_pv", []),
+            classification.get("best_move_san"), classification.get("game_phase", "middlegame"),
+            mate_reason=cached.get("mate_reason"),
+            opening=classification.get("opening"),
+        )
+        if cached.get("mate_reason") == "tablebase_outcome_change":
+            explanation.update({
+                "primary_reason": "tablebase_outcome_change",
+                "confidence": {"score": 1.0, "tier": "high"},
+                "summary": "This move changes the exact tablebase result.",
+                "detail": "Perfect endgame play changes the expected win, draw, or loss after this move.",
+            })
+        explanation["analysis_id"] = analysis_id
+        result = {
+            "analysis_version": "v2", "analysis_id": analysis_id,
+            "evaluation_source": cached.get("evaluation_source", "stockfish"),
+            "coach_explanation": explanation,
+            "threat_preview": threat,
+            "refutation_sequence": threat.get("resulting_pv", []),
+            "analysis_ms": round((time.perf_counter() - started) * 1000),
+        }
+        print(json.dumps({
+            "event": "coach_detailed_analysis",
+            "game_id": game_id,
+            "analysis_id": analysis_id,
+            "duration_ms": result["analysis_ms"],
+        }))
         return result
 
     def _build_warning(self, classification, threat, board, move) -> str:
@@ -150,21 +280,27 @@ class GameManager:
         )
 
     # -- committing a move ----------------------------------------------
-    def commit_move(self, game_id: str, move_uci: str) -> dict:
+    def commit_move(self, game_id: str, move_uci: str, analysis_id: str | None = None) -> dict:
         game = self.get_game(game_id)
         board = game.board
         move = self._parse_move(board, move_uci)
 
+        if analysis_id and analysis_id != game.last_analysis_id:
+            raise ValueError("This move analysis is stale. Please try the move again.")
         if game.last_precheck_move_uci == move_uci and game.last_precheck_classification:
             classification = game.last_precheck_classification
         else:
             classification = self.classifier.classify_move(board, move, game.next_ply)
             
+        committed_analysis_id = analysis_id if analysis_id == game.last_analysis_id else None
         game.last_precheck_move_uci = None
         game.last_precheck_classification = None
+        game.last_analysis_id = None
+        game.analyses.clear()
 
         san = board.san(move)
         ply = game.next_ply
+        fen_before = board.fen()
         board.push(move)
 
         game.move_history.append({
@@ -173,7 +309,9 @@ class GameManager:
             "san": san,
             "classification": classification["label"],
             "cp_loss": classification["cp_loss"],
-            "fen_before": board.fen(),
+            "fen_before": fen_before,
+            "analysis_version": classification.get("analysis_version", "v1"),
+            "analysis_id": committed_analysis_id,
         })
 
         is_over = board.is_game_over()
@@ -216,6 +354,13 @@ class GameManager:
                 game.board.pop()
             if len(game.move_history) > 0:
                 game.move_history.pop()
+
+        # An analysis is bound to the exact pre-move position. Undo always
+        # invalidates any popup or detailed-analysis request still in flight.
+        game.last_precheck_move_uci = None
+        game.last_precheck_classification = None
+        game.last_analysis_id = None
+        game.analyses.clear()
                 
         if self.supabase and game.user_id:
             try:

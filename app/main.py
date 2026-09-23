@@ -8,6 +8,7 @@ import asyncio
 import chess
 import os
 import json
+import time
 import razorpay
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -37,7 +38,7 @@ from .classifier import MoveClassifier
 from .game_manager import GameManager
 from .analytics import calculate_rating_adjustment
 from .schemas import (
-    NewGameRequest, PreMoveCheckRequest, PreMoveCheckResponse,
+    NewGameRequest, PreMoveCheckRequest, PreMoveCheckResponse, MoveExplainRequest,
     CommitMoveRequest, CommitMoveResponse, GameStateResponse,
     StartPuzzleRequest, PuzzleAttemptRequest, PuzzleStateResponse,
     CreateOrderRequest, VerifyPaymentRequest,
@@ -125,12 +126,22 @@ def precheck_move(req: PreMoveCheckRequest):
         raise HTTPException(400, str(e))
 
 
+@app.post("/api/move/explain")
+def explain_move(req: MoveExplainRequest):
+    try:
+        return manager.explain_move(req.game_id, req.move_uci, req.analysis_id)
+    except KeyError:
+        raise HTTPException(404, "Game not found")
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+
+
 @app.post("/api/move/commit", response_model=CommitMoveResponse)
 def commit_move(req: CommitMoveRequest):
     """Call this once the player has confirmed they want to play the move
     (whether or not they heeded the warning)."""
     try:
-        res = manager.commit_move(req.game_id, req.move_uci)
+        res = manager.commit_move(req.game_id, req.move_uci, req.analysis_id)
         
         # Check if game over to update rating
         if res["is_game_over"]:
@@ -216,6 +227,7 @@ def tts_health():
 @app.post("/api/tts")
 async def text_to_speech(req: SpeechRequest):
     """Generate one complete 24 kHz coach message without blocking the API loop."""
+    started = time.perf_counter()
     try:
         audio, cached = await asyncio.to_thread(
             tts_service.synthesize, req.text, req.voice, req.speed
@@ -223,8 +235,21 @@ async def text_to_speech(req: SpeechRequest):
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     except Exception as exc:
-        print(f"Kokoro synthesis failed: {exc}")
+        print(json.dumps({
+            "event": "kokoro_tts",
+            "status": "failed",
+            "duration_ms": round((time.perf_counter() - started) * 1000),
+            "reason": type(exc).__name__,
+        }))
         raise HTTPException(503, "Coach voice is temporarily unavailable")
+
+    duration_ms = round((time.perf_counter() - started) * 1000)
+    print(json.dumps({
+        "event": "kokoro_tts",
+        "status": "ok",
+        "duration_ms": duration_ms,
+        "cache": "hit" if cached else "miss",
+    }))
 
     return Response(
         content=audio,
@@ -232,6 +257,7 @@ async def text_to_speech(req: SpeechRequest):
         headers={
             "Cache-Control": "private, max-age=86400",
             "X-TTS-Cache": "hit" if cached else "miss",
+            "X-TTS-Time-Ms": str(duration_ms),
         },
     )
 
