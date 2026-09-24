@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import chess
 
 PIECE_VALUES = {
@@ -24,6 +25,117 @@ HARMFUL_POSITIONAL_FACTORS = {
     "loss_of_development",
     "loss_of_tempo",
 }
+
+CLASSIFICATION_PROMPTS = {
+    "Book": [
+        "That move follows established opening theory.",
+        "You are still following a recognized opening line.",
+        "This is a well-known move from opening theory.",
+        "That move keeps you within the opening book.",
+        "This position has been played many times before.",
+        "You chose a standard theoretical move.",
+    ],
+    "Brilliant": [
+        "Brilliant! That is a strong and well-justified sacrifice.",
+        "Excellent insight—you found a difficult tactical idea.",
+        "Brilliant move! You gave up material for a powerful continuation.",
+        "That is an exceptional move with a sound sacrifice behind it.",
+        "Beautifully played—you found a move that is both bold and accurate.",
+        "Outstanding! That sacrifice creates a strong advantage.",
+    ],
+    "Only Move": [
+        "That was the only move that preserved your position.",
+        "Excellent—you found the one move that works here.",
+        "This position demanded precision, and you found the only solution.",
+        "Every other option was significantly worse. You chose correctly.",
+        "That was the critical move needed to keep the position together.",
+        "Well found—that was your only reliable continuation.",
+    ],
+    "Great Move": [
+        "Great move! You found a difficult and important continuation.",
+        "That is a strong move that clearly stands above the alternatives.",
+        "Excellent choice—this move creates the best practical chances.",
+        "Very well played. The other options were considerably weaker.",
+        "That move shows strong understanding of the position.",
+        "Great find—you chose a move that was not easy to see.",
+    ],
+    "Best Move": [
+        "Best move—you selected Stockfish’s first choice.",
+        "Excellent—you found the strongest move in the position.",
+        "That is the engine’s preferred continuation.",
+        "Perfect choice. This was the strongest available move.",
+        "You found the most accurate move on the board.",
+        "Well played—that move leads to the best continuation.",
+    ],
+    "Excellent": [
+        "Excellent move. Your choice is nearly as strong as the best move.",
+        "Very accurate—you preserved the strength of your position.",
+        "That is an excellent continuation with no meaningful disadvantage.",
+        "Nicely played. This move keeps your position in excellent shape.",
+        "Strong choice—there is very little separating it from the best move.",
+        "That move is accurate and fully supports your position.",
+    ],
+    "Good": [
+        "Good move. Your position remains healthy.",
+        "Nicely played—that is a sensible continuation.",
+        "Good choice. You have maintained your position.",
+        "That move works well and does not create any serious problems.",
+        "Solid move—you are still on the right track.",
+        "Well played. That is a practical and reliable choice.",
+    ],
+    "Inaccuracy": [
+        "Hold on. Consider the other available moves—there may be a better option.",
+        "Take another look before continuing. A stronger move may be available.",
+        "This move is playable, but the position offers a more accurate choice.",
+        "Pause for a moment and compare this move with your alternatives.",
+        "You may want to reconsider this move. There is likely a better continuation.",
+        "This is a small inaccuracy. Look again and see if you can improve it.",
+    ],
+    "Mistake": [
+        "This is a mistake. Take your time and reconsider the position.",
+        "Hold on—this move creates a meaningful problem. Look for another option.",
+        "Take another look. There is a significantly stronger move available.",
+        "This move weakens your position, so consider a different continuation.",
+        "Slow down and examine the opponent’s possible response before committing.",
+        "This choice gives away part of your advantage. Try to find a safer move.",
+    ],
+    "Blunder": [
+        "Careful—this is a blunder. Check the opponent’s strongest response.",
+        "Stop and look again. This move creates a serious problem.",
+        "This move gives the opponent a major opportunity. Consider another option.",
+        "That is a significant error. Examine the tactical consequences before playing it.",
+        "Take your time—this move can seriously damage your position.",
+        "Warning: the opponent has a powerful reply to this move.",
+    ],
+    "Worst Move": [
+        "This is the most damaging move available. Please reconsider it.",
+        "Stop—this move produces the worst outcome among your options.",
+        "This move creates a critical problem. Look carefully for another solution.",
+        "The consequences of this move are severe. Check the position again.",
+        "This is the weakest available choice. A much better continuation exists.",
+        "Take another look—this move may completely change the game against you.",
+    ],
+    "Opening Pawn Warning": [
+        "Be careful with that pawn move. Developing a piece may be more useful.",
+        "This pawn move may lose valuable opening time. Consider development instead.",
+        "Think again—an early wing-pawn move may not help control the center.",
+        "Your position may benefit more from developing a knight or bishop.",
+        "Before moving that pawn, consider improving your central control.",
+        "This move may be too slow for the opening. Look for active development.",
+    ],
+    "Opening Principle": [
+        "Consider developing a piece or controlling the center.",
+        "Your opening position may improve with faster development.",
+        "Try to bring another piece into the game.",
+        "Castling, development, and central control are important here.",
+        "Look for a move that improves your pieces and prepares your king’s safety.",
+        "This is a good moment to follow the basic principles of the opening.",
+    ],
+}
+
+
+def classification_prompt(label: str) -> str:
+    return random.choice(CLASSIFICATION_PROMPTS.get(label, [f"{label}."]))
 
 
 def game_phase(board: chess.Board, opening: dict | None = None) -> str:
@@ -364,12 +476,7 @@ def build_explanation(
         summary = "Stockfish prefers another move, but there is no verified immediate material loss."
         follow_up = f"The engine prefers a different continuation.{best_text}"
 
-    immediate = {
-        "Inaccuracy": "Hold on. Think about other moves. There may be a better option.",
-        "Mistake": "This is a mistake. Take your time and think about this position.",
-        "Blunder": "That is a blunder.",
-        "Worst Move": "That is a serious blunder.",
-    }.get(label, f"{label}.")
+    immediate = classification_prompt(label)
     tier = "high" if confidence >= 0.85 else "medium" if confidence >= 0.65 else "low"
     return {
         "primary_reason": reason,

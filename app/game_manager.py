@@ -272,6 +272,12 @@ class GameManager:
             mate_reason=cached.get("mate_reason"),
             opening=classification.get("opening"),
         )
+        original_explanation = cached.get("result", {}).get("coach_explanation") or {}
+        original_immediate = original_explanation.get("speech", {}).get("immediate")
+        if original_immediate:
+            # One random phrase is chosen per analysis, not once per endpoint.
+            # This keeps popup, subtitle, and audio wording identical.
+            explanation["speech"]["immediate"] = original_immediate
         if cached.get("mate_reason") == "tablebase_outcome_change":
             explanation.update({
                 "primary_reason": "tablebase_outcome_change",

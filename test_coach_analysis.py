@@ -2,7 +2,10 @@ import unittest
 
 import chess
 
-from app.coach_analysis import build_explanation, exchange_ledger, interruption_policy, is_benign_exchange
+from app.coach_analysis import (
+    CLASSIFICATION_PROMPTS, build_explanation, exchange_ledger,
+    interruption_policy, is_benign_exchange,
+)
 from app.opening_book import OpeningBook
 
 
@@ -42,14 +45,20 @@ class CoachAnalysisTests(unittest.TestCase):
         move = chess.Move.from_uci("e2e3")
         inaccuracy = build_explanation(board, move, "Inaccuracy", 5, [], "Kf2", "endgame")
         mistake = build_explanation(board, move, "Mistake", 10, [], "Kf2", "endgame")
-        self.assertEqual(
-            inaccuracy["speech"]["immediate"],
-            "Hold on. Think about other moves. There may be a better option.",
-        )
-        self.assertEqual(
-            mistake["speech"]["immediate"],
-            "This is a mistake. Take your time and think about this position.",
-        )
+        self.assertIn(inaccuracy["speech"]["immediate"], CLASSIFICATION_PROMPTS["Inaccuracy"])
+        self.assertIn(mistake["speech"]["immediate"], CLASSIFICATION_PROMPTS["Mistake"])
+
+    def test_every_classification_has_six_unique_prompts(self):
+        expected = {
+            "Book", "Brilliant", "Only Move", "Great Move", "Best Move",
+            "Excellent", "Good", "Inaccuracy", "Mistake", "Blunder",
+            "Worst Move", "Opening Pawn Warning", "Opening Principle",
+        }
+        self.assertEqual(set(CLASSIFICATION_PROMPTS), expected)
+        for label, prompts in CLASSIFICATION_PROMPTS.items():
+            with self.subTest(label=label):
+                self.assertEqual(len(prompts), 6)
+                self.assertEqual(len(set(prompts)), 6)
 
     def test_position_based_opening_lookup(self):
         board = chess.Board()
