@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 import sys
@@ -8,7 +8,6 @@ import asyncio
 import chess
 import os
 import json
-import time
 import razorpay
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -42,18 +41,15 @@ from .schemas import (
     CommitMoveRequest, CommitMoveResponse, GameStateResponse,
     StartPuzzleRequest, PuzzleAttemptRequest, PuzzleStateResponse,
     CreateOrderRequest, VerifyPaymentRequest,
-    SpeechRequest,
 )
 
 from .puzzle_manager import PuzzleManager
 from .payments import authenticated_user, validate_purchase, grant_premium
-from .tts import KokoroSpeechService
 
 engine: StockfishEngine = None
 opponent_engine: StockfishEngine = None
 manager: GameManager = None
 puzzle_manager = PuzzleManager()
-tts_service = KokoroSpeechService()
 
 
 @asynccontextmanager
@@ -63,14 +59,6 @@ async def lifespan(app: FastAPI):
     opponent_engine = StockfishEngine(depth=14)
     classifier = MoveClassifier(engine)
     manager = GameManager(engine, opponent_engine, classifier, supabase=supabase)
-    if tts_service.enabled and os.getenv("KOKORO_WARMUP", "true").lower() in {"1", "true", "yes"}:
-        async def warm_tts_in_background():
-            try:
-                await asyncio.to_thread(tts_service.warm)
-            except Exception as exc:
-                # Gameplay remains available; clients fall back to browser speech.
-                print(f"Kokoro warm-up failed: {exc}")
-        app.state.tts_warmup_task = asyncio.create_task(warm_tts_in_background())
     yield
     engine.close()
     opponent_engine.close()
@@ -214,52 +202,6 @@ def robot_move(game_id: str):
 def health():
     return {"status": "ok"}
 
-
-@app.get("/api/tts/health")
-def tts_health():
-    return {
-        "enabled": tts_service.enabled,
-        "ready": tts_service.ready,
-        "voice": tts_service.default_voice,
-    }
-
-
-@app.post("/api/tts")
-async def text_to_speech(req: SpeechRequest):
-    """Generate one complete 24 kHz coach message without blocking the API loop."""
-    started = time.perf_counter()
-    try:
-        audio, cached = await asyncio.to_thread(
-            tts_service.synthesize, req.text, req.voice, req.speed
-        )
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    except Exception as exc:
-        print(json.dumps({
-            "event": "kokoro_tts",
-            "status": "failed",
-            "duration_ms": round((time.perf_counter() - started) * 1000),
-            "reason": type(exc).__name__,
-        }))
-        raise HTTPException(503, "Coach voice is temporarily unavailable")
-
-    duration_ms = round((time.perf_counter() - started) * 1000)
-    print(json.dumps({
-        "event": "kokoro_tts",
-        "status": "ok",
-        "duration_ms": duration_ms,
-        "cache": "hit" if cached else "miss",
-    }))
-
-    return Response(
-        content=audio,
-        media_type="audio/wav",
-        headers={
-            "Cache-Control": "private, max-age=86400",
-            "X-TTS-Cache": "hit" if cached else "miss",
-            "X-TTS-Time-Ms": str(duration_ms),
-        },
-    )
 
 @app.get("/api/game/resume")
 def resume_game(user_id: str):

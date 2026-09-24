@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
-# Stockfish powers analysis; espeak-ng supplies Kokoro's English phonemes.
-RUN apt-get update && apt-get install -y --no-install-recommends stockfish espeak-ng && rm -rf /var/lib/apt/lists/*
+# Stockfish powers move analysis.
+RUN apt-get update && apt-get install -y --no-install-recommends stockfish && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /app

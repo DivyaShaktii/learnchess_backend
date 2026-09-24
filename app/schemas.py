@@ -63,12 +63,6 @@ class PreMoveCheckResponse(BaseModel):
     analysis_ms: Optional[int] = None
 
 
-class SpeechRequest(BaseModel):
-    text: str = Field(min_length=1, max_length=500)
-    voice: Optional[str] = None
-    speed: float = Field(default=1.0, ge=0.75, le=1.25)
-
-
 class CommitMoveRequest(BaseModel):
     game_id: str
     move_uci: str
