@@ -365,8 +365,8 @@ def build_explanation(
         follow_up = f"The engine prefers a different continuation.{best_text}"
 
     immediate = {
-        "Inaccuracy": "That is a slight inaccuracy.",
-        "Mistake": "Hold on. This move needs another look.",
+        "Inaccuracy": "Hold on. Think about other moves. There may be a better option.",
+        "Mistake": "This is a mistake. Take your time and think about this position.",
         "Blunder": "That is a blunder.",
         "Worst Move": "That is a serious blunder.",
     }.get(label, f"{label}.")

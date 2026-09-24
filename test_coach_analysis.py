@@ -37,6 +37,20 @@ class CoachAnalysisTests(unittest.TestCase):
         self.assertEqual(policy["professional"], "audio")
         self.assertEqual(interruption_policy("Good", 2, 1, "fork")["normal"], "none")
 
+    def test_interactive_warning_prompts_are_returned_by_backend(self):
+        board = chess.Board("4k3/8/8/8/8/8/4P3/4K3 w - - 0 1")
+        move = chess.Move.from_uci("e2e3")
+        inaccuracy = build_explanation(board, move, "Inaccuracy", 5, [], "Kf2", "endgame")
+        mistake = build_explanation(board, move, "Mistake", 10, [], "Kf2", "endgame")
+        self.assertEqual(
+            inaccuracy["speech"]["immediate"],
+            "Hold on. Think about other moves. There may be a better option.",
+        )
+        self.assertEqual(
+            mistake["speech"]["immediate"],
+            "This is a mistake. Take your time and think about this position.",
+        )
+
     def test_position_based_opening_lookup(self):
         board = chess.Board()
         board.push_uci("e2e4")
