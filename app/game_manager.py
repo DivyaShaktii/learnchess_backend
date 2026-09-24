@@ -119,7 +119,12 @@ class GameManager:
         # if ever multi-user.
         game = self.get_game(game_id)
         self.opponent_engine.set_strength(game.opponent_rating)
-        moves = self.opponent_engine.best_moves(game.board, n=1, time_limit=1.5)
+        try:
+            configured_limit = float(os.getenv("ROBOT_MOVE_TIME_LIMIT_SECONDS", "0.45"))
+        except ValueError:
+            configured_limit = 0.45
+        time_limit = max(0.1, min(1.0, configured_limit))
+        moves = self.opponent_engine.best_moves(game.board, n=1, time_limit=time_limit)
         return {"moves": moves}
 
     # -- core feature: check a move BEFORE it's committed --------------
